@@ -1,0 +1,5 @@
+xmactouch
+.git
+
+# Debug files
+*.dSYM/
