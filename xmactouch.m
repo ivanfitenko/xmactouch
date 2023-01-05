@@ -126,19 +126,6 @@ return 0;
 }
 
 static void paste(CGEventRef event) {
-  // Mouse click to focus and position insertion cursor.
-  CGPoint mouseLocation = CGEventGetLocation( event );
-  CGEventRef mouseClickDown = CGEventCreateMouseEvent(
-    NULL, kCGEventLeftMouseDown, mouseLocation, kCGMouseButtonLeft );
-  CGEventRef mouseClickUp   = CGEventCreateMouseEvent(
-    NULL, kCGEventLeftMouseUp,   mouseLocation, kCGMouseButtonLeft );
-  CGEventPost( tapH, mouseClickDown );
-  CGEventPost( tapH, mouseClickUp );
-  CFRelease( mouseClickDown );
-  CFRelease( mouseClickUp );
-
-  // Allow click events time to position cursor before pasting.
-  usleep(1000);
 
   // Paste.
   CGEventSourceRef source = CGEventSourceCreate( kCGEventSourceStateCombinedSessionState );
@@ -162,9 +149,6 @@ static void paste(CGEventRef event) {
   CGEventPost( tapH, mouseClickUpMiddle );
   CFRelease( mouseClickDownMiddle );
   CFRelease( mouseClickUpMiddle );
-
-  // Allow click events time to position cursor before pasting.
-  usleep(50);
 
 }
 
@@ -245,7 +229,6 @@ int main (int argc, char ** argv) {
   // will be consumed by void*
   int var_for_callback = 42;
 
-//FIXME: not formatted from here, need to adjust to 2-space tabs
   // connect multitouch devices
   deviceList = (NSMutableArray*)MTDeviceCreateList(); //grab our device list
   for (deviceIndex = 0; deviceIndex<[deviceList count]; deviceIndex++) { 
