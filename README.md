@@ -23,7 +23,8 @@ There is a different tool for you. Please try [macpaste](https://github.com/lode
 1. Enable right click if you didn't do so yet. Go to "System Preferences" -> "Trackpad", and check the box next to "Secondary Click".
 2. Disable Mac’s Look Up which is assigned to three-finger tap. Go to "System Preferences" -> "Trackpad", and uncheck the box next to "Look up & data detectors", or switch the binding to "Force Click with one finger"
 3. Build the binary by running `make` command in source code directory.
-4. Run the binary with `./xmacpaste` in source code directory, or move it whenever you want and run it from there - the further actions are up to you.
+4. Add permissions for xmacpaste and the terminal you use to launch it to "System Settings -> Privacy & Security -> Accessibility".
+5. Run the binary with `./xmacpaste` in source code directory, or move it whenever you want and run it from there - the further actions are up to you.
 
 ### Acknowlegdements:
 This tool is based on [macpaste](https://github.com/lodestone/macpaste), with Multitouch-related headers and guidelines found at http://www.iphonesmartapps.org/aladino/?a=multitouch
