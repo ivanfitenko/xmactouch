@@ -254,6 +254,12 @@ int main (int argc, char ** argv) {
                                   & mouseCallback, // our callback function defined in this file
                                   & var_for_callback // a way to pass user to callback
                                   );
+  if (!myEventTap) {
+    printf("Error: CGEventTapCreate failed. Make sure that the application itself\n");
+    printf("and an application used to launch it (e.g. Terminal) are allowed under\n");
+    printf("System Settings -> Privacy & Security -> Accessibility.\n");
+    return(13);
+  }
 
   // Create a RunLoop Source for it
   eventTapRLSrc = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, myEventTap, 0);
