@@ -80,14 +80,15 @@ int touchCallback(int device, Touch *data, int nFingers, double timestamp, int f
     //printDebugInfos(nFingers, data, 0);
 
     if (nFingers == 3) {
-      //Wait for all 3 fingers to be released on tripple tap
-      if (data[0].state < MTTouchStateBreakTouch ||
-          data[1].state < MTTouchStateBreakTouch ||
-          data[2].state < MTTouchStateBreakTouch) {
-        trippleClickStatus = trippleClickPending;
-      } else {
+      // Releasing any of three fingers sends Tripple Click
+      if (data[0].state == MTTouchStateBreakTouch ||
+          data[1].state == MTTouchStateBreakTouch ||
+          data[2].state == MTTouchStateBreakTouch) {
         trippleClickStatus = trippleClickCompleted;
+      } else {
+        trippleClickStatus = trippleClickPending;
       }
+
 
       if (trippleClickStatus == trippleClickCompleted) {
         // Commented-out debugging output. Maybe enable it later with cli option?
@@ -117,8 +118,6 @@ int touchCallback(int device, Touch *data, int nFingers, double timestamp, int f
         // need further remapping
         rightMouseButtonEventSource = &generatedRightMouseButton;
       }
-      //Allow some time for events to complete
-      usleep(50);
     }
   }
 
