@@ -20,10 +20,10 @@ CGEventTapLocation tapH = kCGHIDEventTap;
 // Status flag for tripple tap
 enum {
   trippleClickPending = 0,
-  trippleClickCompleted = 1,
+  trippleClickSent = 1,
   trippleClickCleared = 2
 };
-int trippleClickStatus;
+int trippleClickStatus = 2;
 
 #define DOUBLE_CLICK_MILLIS 500
 
@@ -84,15 +84,18 @@ int touchCallback(int device, Touch *data, int nFingers, double timestamp, int f
       if (data[0].state == MTTouchStateBreakTouch ||
           data[1].state == MTTouchStateBreakTouch ||
           data[2].state == MTTouchStateBreakTouch) {
-        trippleClickStatus = trippleClickCompleted;
-      } else {
-        trippleClickStatus = trippleClickPending;
+        if (trippleClickStatus == trippleClickCleared) {
+          trippleClickStatus = trippleClickSent;
+        // When click was already sent, releasing other fingers should not
+        // trigger new (duplicate) tripple clicks
+        } else {
+          trippleClickStatus = trippleClickCleared;
+        }
       }
 
-
-      if (trippleClickStatus == trippleClickCompleted) {
+      if (trippleClickStatus == trippleClickSent) {
         // Commented-out debugging output. Maybe enable it later with cli option?
-        //printf("Three-finder tap detected\n");
+        //printf("Three-finger tap detected\n");
 
         //Get current mouse coorinates
         CGEventRef dummyEvent = CGEventCreate(nil);
@@ -113,14 +116,13 @@ int touchCallback(int device, Touch *data, int nFingers, double timestamp, int f
         // We cannot just presizely aim at "MTTouchStateBreakTouch" event here
         // because it is not always generated, so we need this filtering logics
         // to react to the release-related event and then skip subsequent ones.
-        trippleClickStatus = trippleClickCleared;
+        trippleClickStatus = trippleClickPending;
         // set a flag to indicate that this is a re-mapped event and does not
         // need further remapping
         rightMouseButtonEventSource = &generatedRightMouseButton;
       }
     }
   }
-
 return 0;
 }
 
@@ -188,6 +190,11 @@ static CGEventRef mouseCallback (CGEventTapProxy proxy,
       if (*rightMouseButtonEventSource == 1) {
         // done processing remapped right click, reset generated flag
         rightMouseButtonEventSource = &realRightMouseButton;
+        // Give a user 0.05 seconds to raise all fingers, otherwise middle
+        // click events could be generated. Unfortunately, this might break
+        // some of double-clicks with three fingers, but that would be a 
+        // horrible excersize itself, and I hope you don't have to do it.
+        usleep(50000);
       } else {
         paste(event);
         // Drop the original right mouse tap event, we sent a middle button
