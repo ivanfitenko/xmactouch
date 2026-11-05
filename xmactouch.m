@@ -9,6 +9,7 @@
 #include <sys/time.h> // gettimeofday
 #include <unistd.h>
 #include <dispatch/dispatch.h>
+#include <stdatomic.h>
 
 #include "multitouch.h" // required to use MultiTouchSupport.framework
 
@@ -19,6 +20,13 @@
 // be ready the instant the wake notification fires, so retry a few times.
 #define MULTITOUCH_RECONNECT_MAX_ATTEMPTS 5
 #define MULTITOUCH_RECONNECT_RETRY_SECONDS 1.0
+
+// touchCallback runs on a MultitouchSupport-owned background thread, while
+// mouseCallback runs on the main thread via the CGEventTap run loop; the
+// flag they share needs to be atomic so a write on one thread is guaranteed
+// visible before the posted event it precedes is processed on the other.
+#define RIGHT_MOUSE_BUTTON_REAL 0
+#define RIGHT_MOUSE_BUTTON_GENERATED 1
 
 char isDragging = 0;
 long long prevClickTime = 0;
@@ -44,10 +52,8 @@ long long now() {
   return milliseconds;
 }
 
-// Flags to indicate either original right-click or the one generated here.
-int realRightMouseButton = 0;
-int generatedRightMouseButton = 1;
-int *rightMouseButtonEventSource = &realRightMouseButton;
+// Flag to indicate either original right-click or the one generated here.
+_Atomic int rightMouseButtonEventSource = RIGHT_MOUSE_BUTTON_REAL;
 
 //start sending events
 void MTDeviceStart(MTDeviceRef, int);
@@ -82,6 +88,21 @@ static void connectMultitouchDevicesAttempt(int attemptsLeft) {
   //printf("xmactouch: connected %lu multitouch device(s)\n", (unsigned long)count);
 }
 
+// Human-readable Touch.state, for debug logging only.
+static const char* touchStateName(int state) {
+  switch (state) {
+    case MTTouchStateNotTracking:   return "NotTracking";
+    case MTTouchStateStartInRange:  return "StartInRange";
+    case MTTouchStateHoverInRange:  return "HoverInRange";
+    case MTTouchStateMakeTouch:     return "MakeTouch";
+    case MTTouchStateTouching:      return "Touching";
+    case MTTouchStateBreakTouch:    return "BreakTouch";
+    case MTTouchStateLingerInRange: return "LingerInRange";
+    case MTTouchStateOutOfRange:    return "OutOfRange";
+    default:                        return "Unknown";
+  }
+}
+
 //just output debug info. use it to see all the raw infos dumped to screen
 void printDebugInfos(int nFingers, Touch *data, int briefMode) {
   int i;
@@ -89,15 +110,15 @@ void printDebugInfos(int nFingers, Touch *data, int briefMode) {
   for (i=0; i<nFingers; i++) {
     Touch *f = &data[i];
     if (briefMode) {
-      printf("Finger: %d, state: %d\n",
+      printf("Finger: %d, state: %d (%s)\n",
              i,
-             f->state);
+             f->state, touchStateName(f->state));
     } else {
-      printf("Finger: %d, frame: %d, timestamp: %f, ID: %d, state: %d, PosX: %f, PosY: %f, VelX: %f, VelY: %f, Angle: %f, MajorAxis: %f, MinorAxis: %f\n", i,
+      printf("Finger: %d, frame: %d, timestamp: %f, ID: %d, state: %d (%s), PosX: %f, PosY: %f, VelX: %f, VelY: %f, Angle: %f, MajorAxis: %f, MinorAxis: %f\n", i,
              f->frame,
              f->timestamp,
              f->identifier,
-             f->state,
+             f->state, touchStateName(f->state),
              f->normalized.position.x,
              f->normalized.position.y,
              f->normalized.velocity.x,
@@ -113,55 +134,55 @@ void printDebugInfos(int nFingers, Touch *data, int briefMode) {
 int touchCallback(int device, Touch *data, int nFingers, double timestamp, int frame) {
   int i;
 
-  if (nFingers >= 2) { //only report if two or more fingers are touching
-    // Commented-out debugging output. Maybe enable it later with cli option?
-    //printf("Device: %d ",device);
-    //printf("nFingers: %d ", nFingers);
-    //printDebugInfos(nFingers, data, 0);
+  // Commented-out debugging output. Maybe enable it later with cli option?
+  //if (nFingers >= 1) {
+  //  printf("[%lld] touchCallback Device: %d nFingers: %d\n", now(), device, nFingers);
+  //  printDebugInfos(nFingers, data, 0);
+  //}
 
-    if (nFingers == 3) {
-      // Releasing any of three fingers sends Tripple Click
-      if (data[0].state == MTTouchStateBreakTouch ||
-          data[1].state == MTTouchStateBreakTouch ||
-          data[2].state == MTTouchStateBreakTouch) {
-        if (trippleClickStatus == trippleClickCleared) {
-          trippleClickStatus = trippleClickSent;
-        // When click was already sent, releasing other fingers should not
-        // trigger new (duplicate) tripple clicks
-        } else {
-          trippleClickStatus = trippleClickCleared;
-        }
-      }
-
-      if (trippleClickStatus == trippleClickSent) {
-        // Commented-out debugging output. Maybe enable it later with cli option?
-        //printf("Three-finger tap detected\n");
-
-        //Get current mouse coorinates
-        CGEventRef dummyEvent = CGEventCreate(nil);
-        CGPoint mouseLocationSnap = CGEventGetLocation(dummyEvent);
-        CFRelease(dummyEvent);
-
-        //Generate right mouse click
-        CGEventRef mouseClickDown = CGEventCreateMouseEvent(
-          NULL, kCGEventRightMouseDown, mouseLocationSnap, kCGMouseButtonRight );
-        CGEventRef mouseClickUp = CGEventCreateMouseEvent(
-          NULL, kCGEventRightMouseUp, mouseLocationSnap, kCGMouseButtonRight );
-        CGEventPost( tapH, mouseClickDown );
-        CGEventPost( tapH, mouseClickUp );
-        CFRelease( mouseClickDown );
-        CFRelease( mouseClickUp );
-        // Stop processing "fade out" events to avoid treating any to possible
-        // subsequent events "LingerInRange" and "OutOfRange" as new events.
-        // We cannot just presizely aim at "MTTouchStateBreakTouch" event here
-        // because it is not always generated, so we need this filtering logics
-        // to react to the release-related event and then skip subsequent ones.
-        trippleClickStatus = trippleClickPending;
-        // set a flag to indicate that this is a re-mapped event and does not
-        // need further remapping
-        rightMouseButtonEventSource = &generatedRightMouseButton;
-      }
+  if (nFingers == 3) {
+    // Releasing any of three fingers sends Tripple Click. Only arm it from
+    // Cleared, so that the other two fingers' own release events (landing
+    // in later frames of the same gesture, while nFingers is still 3)
+    // don't trigger a duplicate click.
+    if (trippleClickStatus == trippleClickCleared &&
+        (data[0].state == MTTouchStateBreakTouch ||
+         data[1].state == MTTouchStateBreakTouch ||
+         data[2].state == MTTouchStateBreakTouch)) {
+      trippleClickStatus = trippleClickSent;
     }
+
+    if (trippleClickStatus == trippleClickSent) {
+      // Commented-out debugging output. Maybe enable it later with cli option?
+      //printf("[%lld] Three-finger tap detected\n", now());
+
+      //Get current mouse coorinates
+      CGEventRef dummyEvent = CGEventCreate(nil);
+      CGPoint mouseLocationSnap = CGEventGetLocation(dummyEvent);
+      CFRelease(dummyEvent);
+
+      //Generate right mouse click
+      CGEventRef mouseClickDown = CGEventCreateMouseEvent(
+        NULL, kCGEventRightMouseDown, mouseLocationSnap, kCGMouseButtonRight );
+      CGEventRef mouseClickUp = CGEventCreateMouseEvent(
+        NULL, kCGEventRightMouseUp, mouseLocationSnap, kCGMouseButtonRight );
+      CGEventPost( tapH, mouseClickDown );
+      CGEventPost( tapH, mouseClickUp );
+      CFRelease( mouseClickDown );
+      CFRelease( mouseClickUp );
+      trippleClickStatus = trippleClickPending;
+      // set a flag to indicate that this is a re-mapped event and does not
+      // need further remapping
+      rightMouseButtonEventSource = RIGHT_MOUSE_BUTTON_GENERATED;
+    }
+  } else if (trippleClickStatus != trippleClickCleared) {
+    // Fewer than three fingers touching means any three-finger gesture has
+    // fully ended, however its release happened to be split across frames.
+    // Re-arm here instead of waiting for another BreakTouch frame at
+    // nFingers==3 that may never come - relying on that was the bug: a tap
+    // whose three fingers all released within a single frame left no such
+    // frame to re-arm on, silently swallowing the next three-finger tap.
+    trippleClickStatus = trippleClickCleared;
   }
 return 0;
 }
@@ -222,17 +243,21 @@ static CGEventRef mouseCallback (CGEventTapProxy proxy,
                                  CGEventType type, CGEventRef event,
                                  void * refcon) {
 
+  // Commented-out debugging output. Maybe enable it later with cli option?
+  //printf("[%lld] mouseCallback type: %d rightMouseButtonEventSource: %d\n",
+  //       now(), type, rightMouseButtonEventSource);
+
   switch (type) {
     case kCGEventRightMouseDown:
       // RightMouseButton clicks generated by our remapping handler will be
       // left intact. "Real" right clicks will be remapped to middle clicks,
       // plus "cmd-v" keyboard event will be sent to paste from buffer.
-      if (*rightMouseButtonEventSource == 1) {
+      if (rightMouseButtonEventSource == RIGHT_MOUSE_BUTTON_GENERATED) {
         // done processing remapped right click, reset generated flag
-        rightMouseButtonEventSource = &realRightMouseButton;
+        rightMouseButtonEventSource = RIGHT_MOUSE_BUTTON_REAL;
         // Give a user 0.05 seconds to raise all fingers, otherwise middle
         // click events could be generated. Unfortunately, this might break
-        // some of double-clicks with three fingers, but that would be a 
+        // some of double-clicks with three fingers, but that would be a
         // horrible excersize itself, and I hope you don't have to do it.
         usleep(50000);
       } else {
@@ -272,6 +297,10 @@ int main (int argc, char ** argv) {
   // EXAMPLE: sample variable passable to callback, could be anything because it
   // will be consumed by void*
   int var_for_callback = 42;
+
+  // Unbuffered, so debug output shows up immediately even when stdout is
+  // redirected to a file instead of a terminal.
+  setbuf(stdout, NULL);
 
   // connect multitouch devices
   connectMultitouchDevicesAttempt(MULTITOUCH_RECONNECT_MAX_ATTEMPTS);
