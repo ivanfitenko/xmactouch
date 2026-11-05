@@ -1,5 +1,6 @@
 #ifdef __OBJC__
 #import <Foundation/Foundation.h>
+#import <AppKit/AppKit.h> // NSWorkspace sleep/wake notifications
 #endif
 
 #include <CoreFoundation/CoreFoundation.h>
@@ -7,8 +8,17 @@
 #include <Carbon/Carbon.h> // kVK_ANSI_*
 #include <sys/time.h> // gettimeofday
 #include <unistd.h>
+#include <dispatch/dispatch.h>
 
 #include "multitouch.h" // required to use MultiTouchSupport.framework
+
+// The trackpad's multitouch HID service gets torn down and recreated across
+// a sleep/wake cycle, which silently invalidates the device refs we grabbed
+// at launch (no crash, the callback just stops firing). We re-run device
+// discovery on wake to pick up whatever refs are current. The driver may not
+// be ready the instant the wake notification fires, so retry a few times.
+#define MULTITOUCH_RECONNECT_MAX_ATTEMPTS 5
+#define MULTITOUCH_RECONNECT_RETRY_SECONDS 1.0
 
 char isDragging = 0;
 long long prevClickTime = 0;
@@ -41,6 +51,36 @@ int *rightMouseButtonEventSource = &realRightMouseButton;
 
 //start sending events
 void MTDeviceStart(MTDeviceRef, int);
+void MTUnregisterContactFrameCallback(MTDeviceRef, MTContactCallbackFunction);
+
+int touchCallback(int device, Touch *data, int nFingers, double timestamp, int frame);
+
+static void connectMultitouchDevicesAttempt(int attemptsLeft) {
+  NSArray *deviceList = (NSArray*)MTDeviceCreateList();
+  NSUInteger count = [deviceList count];
+
+  if (count == 0 && attemptsLeft > 0) {
+    // Commented-out debugging output. Maybe enable it later with cli option?
+    //printf("xmactouch: no multitouch devices found, retrying (%d attempts left)\n", attemptsLeft);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                    (int64_t)(MULTITOUCH_RECONNECT_RETRY_SECONDS * NSEC_PER_SEC)),
+                    dispatch_get_main_queue(), ^{
+      connectMultitouchDevicesAttempt(attemptsLeft - 1);
+    });
+    return;
+  }
+
+  for (NSUInteger i = 0; i < count; i++) {
+    MTDeviceRef device = (MTDeviceRef)[deviceList objectAtIndex:i];
+    // Unregister first in case this device ref survived the sleep cycle and
+    // is already registered, so we don't end up with duplicate callbacks.
+    MTUnregisterContactFrameCallback(device, touchCallback);
+    MTRegisterContactFrameCallback(device, touchCallback);
+    MTDeviceStart(device, 0);
+  }
+  // Commented-out debugging output. Maybe enable it later with cli option?
+  //printf("xmactouch: connected %lu multitouch device(s)\n", (unsigned long)count);
+}
 
 //just output debug info. use it to see all the raw infos dumped to screen
 void printDebugInfos(int nFingers, Touch *data, int briefMode) {
@@ -226,23 +266,26 @@ static CGEventRef mouseCallback (CGEventTapProxy proxy,
 }
 
 int main (int argc, char ** argv) {
-  int deviceIndex;
   CGEventMask emask;
   CFMachPortRef myEventTap;
   CFRunLoopSourceRef eventTapRLSrc;
-  NSMutableArray* deviceList;
   // EXAMPLE: sample variable passable to callback, could be anything because it
   // will be consumed by void*
   int var_for_callback = 42;
 
   // connect multitouch devices
-  deviceList = (NSMutableArray*)MTDeviceCreateList(); //grab our device list
-  for (deviceIndex = 0; deviceIndex<[deviceList count]; deviceIndex++) { 
-    //iterate over available devices
-    MTRegisterContactFrameCallback([deviceList objectAtIndex:deviceIndex],
-                                    touchCallback); //assign callback for device
-    MTDeviceStart([deviceList objectAtIndex:deviceIndex], 0); //start sending events
-  }
+  connectMultitouchDevicesAttempt(MULTITOUCH_RECONNECT_MAX_ATTEMPTS);
+
+  // The trackpad's multitouch device gets re-enumerated across sleep/wake,
+  // which invalidates the refs grabbed above. Re-run discovery on wake so
+  // two/three-finger gestures keep working after the laptop sleeps.
+  [[[NSWorkspace sharedWorkspace] notificationCenter]
+    addObserverForName:NSWorkspaceDidWakeNotification
+                object:nil
+                 queue:[NSOperationQueue mainQueue]
+            usingBlock:^(NSNotification *note) {
+              connectMultitouchDevicesAttempt(MULTITOUCH_RECONNECT_MAX_ATTEMPTS);
+            }];
 
   // We want "other" mouse button click-release, such as middle or exotic,
   // plus two "regular" buttons, left and right/secondary.
