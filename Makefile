@@ -11,7 +11,8 @@ clean:
 xmactouch: xmactouch.m
 	gcc -o xmactouch xmactouch.m -F/System/Library/PrivateFrameworks \
 		-framework MultitouchSupport \
-		-framework CoreFoundation -framework ApplicationServices -lobjc \
+		-framework CoreFoundation -framework ApplicationServices \
+		-framework AppKit -lobjc \
 
 run:
 	./xmactouch
