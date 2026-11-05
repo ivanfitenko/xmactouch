@@ -5,6 +5,10 @@
 
 This tool intends to make your Macbook trackpad act the same as it would on Linux with Xorg. You can copy the text to the clipboard by simply highlighting (selecting) it (no ctrl-v), and then paste it with two finger tap, which now once again means the middle button - and yes, it's not only about pasting it, two-finger tap is also a middle button for all your apps now. And the right click is remapped to a three-finger tap where we Linux guys always expect it to be on our touchpads.
 
+### WARNING: parasitic input in games, 3d editors, etc.
+
+Some applications that treat your character input not as text, but as direct action (like C character meaning "crouch") would get parasitic input ("c" button pressed when actually only trackpad was used) from mouse+keyboard actions simulated by this app. There are no plans to fix it so far. Please exit (kill) xmactouch before running such apps.
+
 ### Features (the above, in normal language):
 
 * Middle click is now available for Mac's touchpad, and is assigned to a 2-finger tap
