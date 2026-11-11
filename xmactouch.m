@@ -28,6 +28,20 @@
 #define RIGHT_MOUSE_BUTTON_REAL 0
 #define RIGHT_MOUSE_BUTTON_GENERATED 1
 
+// Thresholds for telling a deliberate stationary tap apart from the other
+// three-finger patterns found in testing: a swipe (all fingers move a lot,
+// together), an incidental bystander contact (one finger stays still while
+// the other two move, e.g. a resting palm during a two-finger scroll), and
+// a stale resting contact (all fingers still, but down far longer than any
+// deliberate tap would take). Calibrated from live data: confirmed swipes
+// moved at least ~0.08 (normalized, 0-1 per axis); confirmed resting/
+// bystander fingers never moved more than ~0.03; confirmed swipes/scrolls
+// never lasted longer than ~600ms, while confirmed stale contacts were
+// already down 1100ms+ by the time they fired.
+#define TAP_MAX_DISPLACEMENT 0.05f
+#define TAP_MAX_DISPLACEMENT_SPREAD 0.05f
+#define TAP_MAX_DURATION_MS 700
+
 char isDragging = 0;
 long long prevClickTime = 0;
 long long curClickTime = 0;
@@ -42,6 +56,23 @@ enum {
   trippleClickCleared = 2
 };
 int trippleClickStatus = 2;
+
+// Per-finger-identity displacement/dwell tracking, used to tell a
+// deliberate stationary tap apart from a swipe, an incidental bystander
+// contact, or a stale resting contact (see the TAP_MAX_* defines above).
+// Keyed by touch identifier rather than by slot index, and only cleared on
+// a true nFingers==0 - not on every dip below 3 - so a finger hovering at
+// the edge of range (common right before/after a touch, or from a nearby
+// resting hand) that flickers nFingers between 2 and 3 doesn't keep
+// resetting the other two fingers' real, accumulated scroll/swipe distance
+// out from under the check.
+#define FINGER_TRACK_SLOTS 8
+typedef struct {
+  int identifier; // -1 = empty slot
+  float minX, maxX, minY, maxY;
+  long long firstTs;
+} FingerTrack;
+FingerTrack fingerTrack[FINGER_TRACK_SLOTS];
 
 #define DOUBLE_CLICK_MILLIS 500
 
@@ -86,6 +117,40 @@ static void connectMultitouchDevicesAttempt(int attemptsLeft) {
   }
   // Commented-out debugging output. Maybe enable it later with cli option?
   //printf("xmactouch: connected %lu multitouch device(s)\n", (unsigned long)count);
+}
+
+static void clearFingerTracking() {
+  for (int k = 0; k < FINGER_TRACK_SLOTS; k++) {
+    fingerTrack[k].identifier = -1;
+  }
+}
+
+// Updates (or creates) the tracking entry for this finger identity with the
+// current position, and returns it.
+static FingerTrack* trackFinger(int identifier, float x, float y, long long ts) {
+  int k;
+  for (k = 0; k < FINGER_TRACK_SLOTS; k++) {
+    if (fingerTrack[k].identifier == identifier) {
+      if (x < fingerTrack[k].minX) fingerTrack[k].minX = x;
+      if (x > fingerTrack[k].maxX) fingerTrack[k].maxX = x;
+      if (y < fingerTrack[k].minY) fingerTrack[k].minY = y;
+      if (y > fingerTrack[k].maxY) fingerTrack[k].maxY = y;
+      return &fingerTrack[k];
+    }
+  }
+  for (k = 0; k < FINGER_TRACK_SLOTS; k++) {
+    if (fingerTrack[k].identifier == -1) {
+      fingerTrack[k].identifier = identifier;
+      fingerTrack[k].minX = fingerTrack[k].maxX = x;
+      fingerTrack[k].minY = fingerTrack[k].maxY = y;
+      fingerTrack[k].firstTs = ts;
+      return &fingerTrack[k];
+    }
+  }
+  // Table full (more than FINGER_TRACK_SLOTS concurrent identities since the
+  // last full release) - extremely unlikely for a 3-finger gesture. Fall
+  // back to the first slot rather than tracking nothing.
+  return &fingerTrack[0];
 }
 
 // Human-readable Touch.state, for debug logging only.
@@ -140,16 +205,66 @@ int touchCallback(int device, Touch *data, int nFingers, double timestamp, int f
   //  printDebugInfos(nFingers, data, 0);
   //}
 
+  if (nFingers == 0) {
+    clearFingerTracking();
+  } else {
+    long long ts = now();
+    for (i = 0; i < nFingers; i++) {
+      trackFinger(data[i].identifier, data[i].normalized.position.x,
+                  data[i].normalized.position.y, ts);
+    }
+  }
+
   if (nFingers == 3) {
     // Releasing any of three fingers sends Tripple Click. Only arm it from
     // Cleared, so that the other two fingers' own release events (landing
     // in later frames of the same gesture, while nFingers is still 3)
-    // don't trigger a duplicate click.
+    // don't trigger a duplicate click. Also only arm it if this looks like
+    // a deliberate stationary tap rather than a swipe, an incidental
+    // bystander contact, or a stale resting contact - see the TAP_MAX_*
+    // defines above for how each of those was characterized from live data.
     if (trippleClickStatus == trippleClickCleared &&
         (data[0].state == MTTouchStateBreakTouch ||
          data[1].state == MTTouchStateBreakTouch ||
          data[2].state == MTTouchStateBreakTouch)) {
-      trippleClickStatus = trippleClickSent;
+      float disp[3];
+      long long firstTs[3];
+      for (i = 0; i < 3; i++) {
+        FingerTrack *t = trackFinger(data[i].identifier, data[i].normalized.position.x,
+                                      data[i].normalized.position.y, now());
+        float dx = t->maxX - t->minX;
+        float dy = t->maxY - t->minY;
+        disp[i] = (dx > dy) ? dx : dy;
+        firstTs[i] = t->firstTs;
+      }
+      float maxDisp = disp[0] > disp[1] ? disp[0] : disp[1];
+      if (disp[2] > maxDisp) maxDisp = disp[2];
+      float minDisp = disp[0] < disp[1] ? disp[0] : disp[1];
+      if (disp[2] < minDisp) minDisp = disp[2];
+      // Time since the oldest of the three fingers arrived: using the
+      // earliest, not the latest, so a long-resting stationary bystander
+      // still flags the group as stale even when the third finger joined
+      // only moments before releasing - that's indistinguishable from a
+      // genuine tap by displacement alone (the bystander isn't moving
+      // either way), so duration is what has to catch it here.
+      long long groupStartTs = firstTs[0];
+      if (firstTs[1] < groupStartTs) groupStartTs = firstTs[1];
+      if (firstTs[2] < groupStartTs) groupStartTs = firstTs[2];
+      long long windowDuration = now() - groupStartTs;
+
+      // Commented-out debugging output. Maybe enable it later with cli option?
+      //if (!(maxDisp <= TAP_MAX_DISPLACEMENT &&
+      //      (maxDisp - minDisp) <= TAP_MAX_DISPLACEMENT_SPREAD &&
+      //      windowDuration <= TAP_MAX_DURATION_MS)) {
+      //  printf("[%lld] touchCallback: three-finger release rejected (not a tap) - "
+      //         "maxDisp=%.3f minDisp=%.3f windowDuration=%lldms\n",
+      //         now(), maxDisp, minDisp, windowDuration);
+      //}
+      if (maxDisp <= TAP_MAX_DISPLACEMENT &&
+          (maxDisp - minDisp) <= TAP_MAX_DISPLACEMENT_SPREAD &&
+          windowDuration <= TAP_MAX_DURATION_MS) {
+        trippleClickStatus = trippleClickSent;
+      }
     }
 
     if (trippleClickStatus == trippleClickSent) {
@@ -301,6 +416,8 @@ int main (int argc, char ** argv) {
   // Unbuffered, so debug output shows up immediately even when stdout is
   // redirected to a file instead of a terminal.
   setbuf(stdout, NULL);
+
+  clearFingerTracking();
 
   // connect multitouch devices
   connectMultitouchDevicesAttempt(MULTITOUCH_RECONNECT_MAX_ATTEMPTS);
